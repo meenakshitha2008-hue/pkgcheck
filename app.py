@@ -2,8 +2,10 @@ import json
 from difflib import SequenceMatcher
 
 import joblib
-import pandas as pd
+import numpy as np
 from fastapi import FastAPI
+
+from db import init_db, log_prediction, mark_wrong
 
 app = FastAPI(title="pkgcheck")
 
@@ -12,6 +14,11 @@ with open("models/popular.json") as f:
     info = json.load(f)
 features = info["features"]
 popular = info["popular"]
+
+try:
+    init_db()
+except Exception as e:
+    print("Database not ready:", e)
 
 
 def clean(name):
@@ -28,17 +35,26 @@ def closest(n):
     return round(best, 3), best_name
 
 
+def save(name, verdict, risk, reasons):
+    try:
+        return log_prediction(name, verdict, risk, reasons)
+    except Exception as e:
+        print("Could not save to database:", e)
+        return None
+
+
 @app.get("/check")
 def check(name: str):
     n = clean(name)
     if n in popular:
-        return {"name": name, "verdict": "SAFE", "risk_score": 0.0,
-                "reasons": ["one of the 500 most popular packages"]}
+        reasons = ["one of the 500 most popular packages"]
+        check_id = save(name, "SAFE", 0.0, reasons)
+        return {"id": check_id, "name": name, "verdict": "SAFE",
+                "risk_score": 0.0, "reasons": reasons}
 
     score, similar_to = closest(n)
     row = [[len(n), sum(c.isdigit() for c in n), n.count("-"), score]]
-    X = pd.DataFrame(row, columns=features)
-    risk = float(model.predict_proba(X)[0][1])
+    risk = round(float(model.predict_proba(np.array(row))[0][1]), 2)
 
     reasons = []
     if score >= 0.85:
@@ -48,5 +64,19 @@ def check(name: str):
     if risk >= 0.5 and not reasons:
         reasons.append("name pattern looks like known bad packages")
 
-    return {"name": name, "verdict": "RISKY" if risk >= 0.5 else "SAFE",
-            "risk_score": round(risk, 2), "reasons": reasons}
+    verdict = "RISKY" if risk >= 0.5 else "SAFE"
+    check_id = save(name, verdict, risk, reasons)
+    return {"id": check_id, "name": name, "verdict": verdict,
+            "risk_score": risk, "reasons": reasons}
+
+
+@app.post("/feedback")
+def feedback(check_id: int):
+    try:
+        changed = mark_wrong(check_id)
+    except Exception as e:
+        print("Could not save feedback:", e)
+        return {"ok": False, "message": "database not available"}
+    if changed == 0:
+        return {"ok": False, "message": "no check with that id"}
+    return {"ok": True, "message": "thanks, marked as wrong alert"}
