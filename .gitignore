@@ -222,3 +222,4 @@ __marimo__/
 mlflow.db
 mlruns/
 drift_report.html
+models/model_candidate.joblib
